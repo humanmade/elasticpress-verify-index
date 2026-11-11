@@ -1,0 +1,28 @@
+{
+	"name": "humanmade/elasticpress-verify-index",
+	"description": "WP-CLI command that checks a random sample of posts against the ElasticPress index.",
+	"type": "wordpress-plugin",
+	"license": "GPL-2.0-or-later",
+	"authors": [
+		{
+			"name": "Human Made",
+			"homepage": "https://humanmade.com/"
+		}
+	],
+	"require": {
+		"php": ">=8.1"
+	},
+	"require-dev": {
+		"humanmade/coding-standards": "^2.5",
+		"phpunit/phpunit": "^9.6"
+	},
+	"scripts": {
+		"lint": "phpcs",
+		"test": "phpunit"
+	},
+	"config": {
+		"allow-plugins": {
+			"dealerdirect/phpcodesniffer-composer-installer": true
+		}
+	}
+}
