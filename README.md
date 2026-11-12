@@ -44,7 +44,7 @@ Remove it again with `wp package uninstall humanmade/elasticpress-verify-index`.
 With Composer, as part of a site's dependencies:
 
 ```sh
-composer require humanmade/elasticpress-verify-index:dev-main
+composer require humanmade/elasticpress-verify-index
 ```
 
 As a plugin, by copying this repository into the plugins folder and activating it.
