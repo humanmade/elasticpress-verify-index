@@ -31,12 +31,23 @@ The command lists problems by post ID only, so its output is safe to share in a 
 
 ## Installation
 
-Install it as a plugin. Or, with Composer, add this repository as a VCS repository and require it:
+Install it in whichever way suits you.
+
+As a WP-CLI package, so it's available on every site you run WP-CLI against, without changing the site's code:
 
 ```sh
-composer config repositories.elasticpress-verify-index vcs https://github.com/humanmade/elasticpress-verify-index
+wp package install humanmade/elasticpress-verify-index
+```
+
+Remove it again with `wp package uninstall humanmade/elasticpress-verify-index`.
+
+With Composer, as part of a site's dependencies:
+
+```sh
 composer require humanmade/elasticpress-verify-index:dev-main
 ```
+
+As a plugin, by copying this repository into the plugins folder and activating it.
 
 To run it once without installing it, load it with `--require`:
 

@@ -13,6 +13,11 @@
 
 namespace HM\EP_Verify_Index;
 
+// Skip a second copy, such as an active plugin and a WP-CLI package at the same time.
+if ( function_exists( __NAMESPACE__ . '\\bootstrap' ) ) {
+	return;
+}
+
 require_once __DIR__ . '/inc/namespace.php';
 
 if ( defined( 'WP_CLI' ) && WP_CLI ) {
