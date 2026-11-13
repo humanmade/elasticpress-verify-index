@@ -118,4 +118,83 @@ class Test_Namespace extends TestCase {
 
 		$this->assertSame( [ 'post_name', 'post_title', 'post_status' ], EP_Verify_Index\compare_fields( $row, $doc ) );
 	}
+
+	/**
+	 * Ancestors are added once each, and a term with no known parent is kept as it is.
+	 */
+	public function test_with_ancestors_adds_each_ancestor_once(): void {
+		$parents = [
+			30 => 20,
+			31 => 20,
+			20 => 10,
+			10 => 0,
+		];
+
+		$this->assertSame( [ 30, 20, 10, 31, 99 ], EP_Verify_Index\with_ancestors( [ '30', 31, 99 ], $parents ) );
+		$this->assertSame( [], EP_Verify_Index\with_ancestors( [], $parents ) );
+	}
+
+	/**
+	 * Terms that are each other's parent don't loop for ever.
+	 */
+	public function test_with_ancestors_stops_on_a_loop(): void {
+		$parents = [
+			1 => 2,
+			2 => 1,
+		];
+
+		$this->assertSame( [ 1, 2 ], EP_Verify_Index\with_ancestors( [ 1 ], $parents ) );
+	}
+
+	/**
+	 * The same terms match whatever their order or type, and a taxonomy with no terms on either side matches.
+	 */
+	public function test_compare_terms_matches_across_order_and_types(): void {
+		$expected = [
+			'category' => [ '5', '3' ],
+			'post_tag' => [],
+		];
+		$doc      = [
+			'terms' => [
+				'category' => [
+					[ 'term_id' => 3 ],
+					[ 'term_id' => 5 ],
+				],
+			],
+		];
+
+		$this->assertSame( [], EP_Verify_Index\compare_terms( $expected, $doc ) );
+		$this->assertSame( [], EP_Verify_Index\compare_terms( [ 'post_tag' => [] ], [] ) );
+	}
+
+	/**
+	 * Missing, extra and absent terms are reported by taxonomy.
+	 */
+	public function test_compare_terms_lists_taxonomies_that_differ(): void {
+		$expected = [
+			'category' => [ 5 ],
+			'post_tag' => [ 8 ],
+			'language' => [ 7 ],
+			'genre'    => [],
+		];
+		$doc      = [
+			'terms' => [
+				'category' => [
+					[ 'term_id' => 5 ],
+					[ 'term_id' => 6 ],
+				],
+				'post_tag' => [
+					[ 'term_id' => 9 ],
+				],
+				'genre'    => [
+					[ 'term_id' => 4 ],
+				],
+			],
+		];
+
+		$this->assertSame(
+			[ 'terms.category', 'terms.post_tag', 'terms.language', 'terms.genre' ],
+			EP_Verify_Index\compare_terms( $expected, $doc )
+		);
+	}
 }

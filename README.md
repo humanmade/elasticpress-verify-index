@@ -21,6 +21,18 @@ It samples from both sides:
 
 The list of indexable posts uses the same post types, statuses, query filters and sync kill filters (`ep_post_sync_kill`) as an ElasticPress sync. Password-protected posts are left out, as ElasticPress does, unless a filter adds them.
 
+### Terms
+
+With `--terms`, it also compares the terms assigned to each post, in every taxonomy ElasticPress indexes for that post. A post whose document has missing, extra or different terms is reported as a mismatch, with `terms.<taxonomy>` in the fields column.
+
+Use it when archives, filters or search depend on terms in the index, for example on a multilingual site where every query filters on a language taxonomy. A document can match on every post field and still be left out of those queries because it has lost a term.
+
+The expected terms are read straight from the database, not through the object cache, so the check also finds documents that were indexed while the cache held out-of-date terms. It uses the same taxonomies as an ElasticPress sync (`ep_sync_taxonomies`), and expects the ancestors of each term too, unless `ep_sync_terms_allow_hierarchy` turns them off.
+
+It compares term IDs only. It doesn't notice a term that was renamed without its posts being reindexed. If a site changes a post's terms on the way into the index, with a `get_the_terms` or `ep_post_sync_args` filter, those posts are reported as mismatches.
+
+### Output
+
 The command lists problems by post ID only, so its output is safe to share in a ticket. It exits with status 1 if it finds a problem, or if a request to Elasticsearch fails. A failed request is never reported as a missing document.
 
 ## Requirements
@@ -58,13 +70,14 @@ wp --require=path/to/elasticpress-verify-index/plugin.php elasticpress verify-in
 ## Usage
 
 ```sh
-wp elasticpress verify-index [--sample=<percent>] [--check=<check>] [--format=<format>]
+wp elasticpress verify-index [--sample=<percent>] [--check=<check>] [--terms] [--format=<format>]
 ```
 
 | Option | Default | Description |
 | --- | --- | --- |
 | `--sample` | `10` | Percentage of posts and documents to check, more than 0 and at most 100. |
 | `--check` | `both` | `database`, `index` or `both`. |
+| `--terms` | off | Also compare the terms assigned to each post. |
 | `--format` | `table` | Format for the list of problems: `table`, `csv` or `json`. |
 
 The index check returns at most 10,000 documents, the most one search request can return.
@@ -81,6 +94,12 @@ Check every post on one site:
 
 ```sh
 wp elasticpress verify-index --url=example.com --sample=100
+```
+
+Check every post on one site, including its terms:
+
+```sh
+wp elasticpress verify-index --url=example.com --sample=100 --terms
 ```
 
 Check every site in a multisite network. Each site has its own index, so run the command once per site:
@@ -103,6 +122,12 @@ index     1224  mismatch            post_title
 Error: Found 5 problems in index example-post-1.
 ```
 
+With `--terms`, a post whose document has the wrong terms in a taxonomy looks like this:
+
+```
+database  1227  mismatch            terms.category
+```
+
 If ElasticPress is still indexing the site, the command warns you, because posts may not be indexed yet.
 
 ## Fixing problems
@@ -110,8 +135,18 @@ If ElasticPress is still indexing the site, the command warns you, because posts
 For "missing from index" and "mismatch" problems, reindex the affected posts, then run the check again:
 
 ```sh
-wp elasticpress sync --include=1224,1225,1226
+wp elasticpress sync --indexables=post --include=1224,1225,1226
 ```
+
+`--indexables=post` keeps the sync to posts. Without it, ElasticPress applies the same IDs to every active indexable, such as terms or users.
+
+If a `terms.<taxonomy>` mismatch is still there after the sync, the object cache may hold out-of-date terms for those posts, and the sync reads terms through it. Clear the cached terms for those posts, then sync again:
+
+```sh
+wp eval 'foreach ( [ 1224, 1225, 1226 ] as $id ) { clean_object_term_cache( $id, get_post_type( $id ) ); }'
+```
+
+This clears the terms for those posts only. `wp cache flush` also works, but it empties the whole object cache, usually for every site on a multisite network.
 
 A sync doesn't delete documents, so it can't fix "post deleted" or "post not indexable" problems. Delete those documents one at a time:
 

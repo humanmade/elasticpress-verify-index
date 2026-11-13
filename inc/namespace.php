@@ -15,6 +15,11 @@ use WP_CLI;
 const FIELDS = [ 'ID', 'post_name', 'post_title', 'post_type', 'post_status' ];
 
 /**
+ * Document field holding the IDs of a post's terms, in every taxonomy.
+ */
+const TERMS_FIELD = 'terms.*.term_id';
+
+/**
  * Register the WP-CLI command under the ElasticPress namespace.
  *
  * @return void
@@ -78,6 +83,49 @@ function compare_fields( array $row, array $doc ): array {
 		$doc_value = $doc[ $field ] ?? null;
 		if ( (string) $db_value !== (string) $doc_value || ( $db_value === null ) !== ( $doc_value === null ) ) {
 			$mismatched[] = $field;
+		}
+	}
+
+	return $mismatched;
+}
+
+/**
+ * Add the ancestors of each term to a list of term IDs.
+ *
+ * @param int[] $term_ids Term IDs.
+ * @param int[] $parents  Parent term IDs keyed by term ID.
+ * @return int[]
+ */
+function with_ancestors( array $term_ids, array $parents ): array {
+	$all = [];
+	foreach ( $term_ids as $term_id ) {
+		$term_id = (int) $term_id;
+		// Stops at a term already listed, so a loop of parents ends.
+		while ( $term_id && ! isset( $all[ $term_id ] ) ) {
+			$all[ $term_id ] = true;
+			$term_id         = (int) ( $parents[ $term_id ] ?? 0 );
+		}
+	}
+
+	return array_keys( $all );
+}
+
+/**
+ * List the taxonomies whose terms differ between the database and an indexed document.
+ *
+ * @param array[] $expected Term IDs from the database, keyed by taxonomy.
+ * @param array   $doc      Document source from Elasticsearch.
+ * @return string[] Document fields that don't match, such as terms.category.
+ */
+function compare_terms( array $expected, array $doc ): array {
+	$mismatched = [];
+	foreach ( $expected as $taxonomy => $term_ids ) {
+		$db_ids  = array_unique( array_map( 'intval', $term_ids ) );
+		$doc_ids = array_unique( array_map( 'intval', array_column( $doc['terms'][ $taxonomy ] ?? [], 'term_id' ) ) );
+		sort( $db_ids );
+		sort( $doc_ids );
+		if ( $db_ids !== $doc_ids ) {
+			$mismatched[] = 'terms.' . $taxonomy;
 		}
 	}
 

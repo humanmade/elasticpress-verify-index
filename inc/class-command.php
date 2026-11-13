@@ -37,11 +37,26 @@ class Command {
 	protected $format = 'table';
 
 	/**
+	 * Whether to compare terms as well as post fields.
+	 *
+	 * @var bool
+	 */
+	protected $terms = false;
+
+	/**
+	 * Parent term IDs found so far, keyed by taxonomy and then term ID.
+	 *
+	 * @var array[]
+	 */
+	protected $term_parents = [];
+
+	/**
 	 * Check a random sample of posts against the Elasticsearch index for the current site.
 	 *
-	 * Compares the ID, slug, title, post type and post status. The database check finds posts that are
-	 * missing from the index or out of date. The index check finds documents for posts that were deleted
-	 * or are no longer indexable. Exits with status 1 if it finds any problems.
+	 * Compares the ID, slug, title, post type and post status, and with --terms the terms assigned to
+	 * each post. The database check finds posts that are missing from the index or out of date. The index
+	 * check finds documents for posts that were deleted or are no longer indexable. Exits with status 1
+	 * if it finds any problems.
 	 *
 	 * Run it once for each site in a multisite network, with --url.
 	 *
@@ -63,6 +78,9 @@ class Command {
 	 *   - index
 	 * ---
 	 *
+	 * [--terms]
+	 * : Also compare the terms assigned to each post.
+	 *
 	 * [--format=<format>]
 	 * : Format for the list of problems.
 	 * ---
@@ -78,6 +96,9 @@ class Command {
 	 *     # Check 10% of the posts and documents on one site.
 	 *     $ wp elasticpress verify-index --url=example.com
 	 *
+	 *     # Check every post, including its terms.
+	 *     $ wp elasticpress verify-index --sample=100 --terms
+	 *
 	 *     # Check every site in a network.
 	 *     $ wp site list --field=url | xargs -I % wp elasticpress verify-index --url=%
 	 *
@@ -91,6 +112,7 @@ class Command {
 		$format  = CLI_Utils\get_flag_value( $assoc_args, 'format', 'table' );
 
 		$this->format = $format;
+		$this->terms  = (bool) CLI_Utils\get_flag_value( $assoc_args, 'terms', false );
 
 		if ( $percent <= 0 || $percent > 100 ) {
 			WP_CLI::error( 'The sample must be more than 0 and at most 100.' );
@@ -228,8 +250,9 @@ class Command {
 
 		foreach ( array_chunk( $sample, self::BATCH_SIZE ) as $batch ) {
 			$this->prime_posts( $batch );
-			$rows = $this->get_post_rows( $batch );
-			$docs = $this->get_documents( $indexable->get_index_name(), $batch );
+			$rows  = $this->get_post_rows( $batch );
+			$terms = $this->terms ? $this->get_assigned_terms( $batch ) : [];
+			$docs  = $this->get_documents( $indexable->get_index_name(), $batch );
 
 			foreach ( $batch as $id ) {
 				if ( ! isset( $rows[ $id ] ) ) {
@@ -249,6 +272,9 @@ class Command {
 				}
 
 				$fields = compare_fields( $rows[ $id ], $docs[ $id ] );
+				if ( $this->terms ) {
+					$fields = array_merge( $fields, compare_terms( $this->get_expected_terms( $indexable, $id, $terms[ $id ] ?? [] ), $docs[ $id ] ) );
+				}
 				if ( $fields ) {
 					$problems[] = $this->problem( 'database', $id, 'mismatch', $fields );
 				}
@@ -290,7 +316,7 @@ class Command {
 
 		$response = $this->request( $index . '/_search', [
 			'size'    => $size,
-			'_source' => FIELDS,
+			'_source' => $this->get_source_fields(),
 			'query'   => [
 				'function_score' => [
 					'query'        => [ 'match_all' => (object) [] ],
@@ -313,7 +339,8 @@ class Command {
 
 		foreach ( array_chunk( array_keys( $docs ), self::BATCH_SIZE ) as $batch ) {
 			$this->prime_posts( $batch );
-			$rows = $this->get_post_rows( $batch );
+			$rows  = $this->get_post_rows( $batch );
+			$terms = $this->terms ? $this->get_assigned_terms( $batch ) : [];
 			foreach ( $batch as $id ) {
 				if ( ! isset( $rows[ $id ] ) ) {
 					++$stale;
@@ -328,6 +355,9 @@ class Command {
 				}
 
 				$fields = compare_fields( $rows[ $id ], $docs[ $id ] );
+				if ( $this->terms ) {
+					$fields = array_merge( $fields, compare_terms( $this->get_expected_terms( $indexable, $id, $terms[ $id ] ?? [] ), $docs[ $id ] ) );
+				}
 				if ( $fields ) {
 					$problems[] = $this->problem( 'index', $id, 'mismatch', $fields );
 				}
@@ -355,7 +385,7 @@ class Command {
 	 * @return array[] Document sources keyed by ID, for the documents that exist.
 	 */
 	protected function get_documents( string $index, array $ids ): array {
-		$path     = $index . '/_mget?_source_includes=' . implode( ',', FIELDS );
+		$path     = $index . '/_mget?_source_includes=' . implode( ',', $this->get_source_fields() );
 		$response = $this->request( $path, [ 'ids' => array_map( 'strval', $ids ) ] );
 		if ( ! isset( $response['docs'] ) ) {
 			WP_CLI::error( sprintf( 'Could not fetch documents from index %s.', $index ) );
@@ -396,6 +426,174 @@ class Command {
 		);
 
 		return array_column( $rows, null, 'ID' );
+	}
+
+	/**
+	 * Get the document fields to fetch from the index.
+	 *
+	 * @return string[]
+	 */
+	protected function get_source_fields(): array {
+		return $this->terms ? array_merge( FIELDS, [ TERMS_FIELD ] ) : FIELDS;
+	}
+
+	/**
+	 * Get the terms assigned to a set of posts, straight from the database.
+	 *
+	 * Also looks up the ancestors of those terms, when ElasticPress indexes them.
+	 *
+	 * @param int[] $ids Post IDs.
+	 * @return array[] Term IDs keyed by post ID and then taxonomy.
+	 */
+	protected function get_assigned_terms( array $ids ): array {
+		$assigned = [];
+		$unknown  = [];
+
+		foreach ( $this->get_term_rows( $ids ) as $row ) {
+			$taxonomy = $row['taxonomy'];
+			$term_id  = (int) $row['term_id'];
+			$parent   = (int) $row['parent'];
+
+			$assigned[ (int) $row['object_id'] ][ $taxonomy ][] = $term_id;
+
+			$this->term_parents[ $taxonomy ][ $term_id ] = $parent;
+			if ( $parent ) {
+				$unknown[ $taxonomy ][ $parent ] = true;
+			}
+		}
+
+		if ( $this->allow_term_hierarchy() ) {
+			$this->load_term_ancestors( $unknown );
+		}
+
+		return $assigned;
+	}
+
+	/**
+	 * Look up the parents of a set of terms, and their parents in turn, until every ancestor is known.
+	 *
+	 * @param array[] $unknown Term IDs to look up, as keys, grouped by taxonomy.
+	 * @return void
+	 */
+	protected function load_term_ancestors( array $unknown ): void {
+		while ( $unknown ) {
+			$wanted = [];
+			foreach ( $unknown as $taxonomy => $term_ids ) {
+				foreach ( array_keys( $term_ids ) as $term_id ) {
+					if ( ! isset( $this->term_parents[ $taxonomy ][ $term_id ] ) ) {
+						// Stays 0 if the term no longer exists.
+						$this->term_parents[ $taxonomy ][ $term_id ] = 0;
+						$wanted[ $term_id ]                          = true;
+					}
+				}
+			}
+
+			$unknown = [];
+			if ( ! $wanted ) {
+				break;
+			}
+
+			foreach ( $this->get_parent_rows( array_keys( $wanted ) ) as $row ) {
+				$parent = (int) $row['parent'];
+				if ( ! $parent ) {
+					continue;
+				}
+
+				$this->term_parents[ $row['taxonomy'] ][ (int) $row['term_id'] ] = $parent;
+
+				$unknown[ $row['taxonomy'] ][ $parent ] = true;
+			}
+		}
+	}
+
+	/**
+	 * Get the term IDs ElasticPress would index for a post, keyed by taxonomy.
+	 *
+	 * @param \ElasticPress\Indexable\Post\Post $indexable The post indexable.
+	 * @param int                               $id        Post ID.
+	 * @param array[]                           $assigned  Term IDs assigned to the post, keyed by taxonomy.
+	 * @return array[] An entry for every indexed taxonomy, empty when the post has no terms in it.
+	 */
+	protected function get_expected_terms( $indexable, int $id, array $assigned ): array {
+		$hierarchy = $this->allow_term_hierarchy();
+		$expected  = [];
+
+		foreach ( $this->get_indexed_taxonomies( $indexable, $id ) as $taxonomy ) {
+			$term_ids              = $assigned[ $taxonomy ] ?? [];
+			$expected[ $taxonomy ] = $hierarchy ? with_ancestors( $term_ids, $this->term_parents[ $taxonomy ] ?? [] ) : $term_ids;
+		}
+
+		return $expected;
+	}
+
+	/**
+	 * Get the names of the taxonomies ElasticPress indexes for a post.
+	 *
+	 * @param \ElasticPress\Indexable\Post\Post $indexable The post indexable.
+	 * @param int                               $id        Post ID.
+	 * @return string[]
+	 */
+	protected function get_indexed_taxonomies( $indexable, int $id ): array {
+		$post = get_post( $id );
+		if ( ! $post ) {
+			return [];
+		}
+
+		return wp_list_pluck( $indexable->get_indexable_post_taxonomies( $post ), 'name' );
+	}
+
+	/**
+	 * Check whether ElasticPress indexes the ancestors of a post's terms.
+	 *
+	 * @return bool
+	 */
+	protected function allow_term_hierarchy(): bool {
+		/** This filter is documented in ElasticPress's Indexable/Post/Post.php. */
+		return (bool) apply_filters( 'ep_sync_terms_allow_hierarchy', true );
+	}
+
+	/**
+	 * Get the term relationships for a set of posts, straight from the database.
+	 *
+	 * @param int[] $ids Post IDs.
+	 * @return array[] Rows with object_id, taxonomy, term_id and parent.
+	 */
+	protected function get_term_rows( array $ids ): array {
+		global $wpdb;
+
+		if ( empty( $ids ) ) {
+			return [];
+		}
+
+		return $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT tr.object_id, tt.taxonomy, tt.term_id, tt.parent FROM {$wpdb->term_relationships} tr INNER JOIN {$wpdb->term_taxonomy} tt ON tt.term_taxonomy_id = tr.term_taxonomy_id WHERE tr.object_id IN (" . implode( ',', array_fill( 0, count( $ids ), '%d' ) ) . ')',
+				$ids
+			),
+			ARRAY_A
+		);
+	}
+
+	/**
+	 * Get the parents of a set of terms, straight from the database.
+	 *
+	 * @param int[] $term_ids Term IDs.
+	 * @return array[] Rows with term_id, taxonomy and parent.
+	 */
+	protected function get_parent_rows( array $term_ids ): array {
+		global $wpdb;
+
+		if ( empty( $term_ids ) ) {
+			return [];
+		}
+
+		return $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT term_id, taxonomy, parent FROM {$wpdb->term_taxonomy} WHERE term_id IN (" . implode( ',', array_fill( 0, count( $term_ids ), '%d' ) ) . ')',
+				$term_ids
+			),
+			ARRAY_A
+		);
 	}
 
 	/**
